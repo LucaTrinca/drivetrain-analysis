@@ -344,11 +344,142 @@ DIRECTION_COLORS = {0: "#2a78d6", 45: "#eb6834", 90: "#1baf7a", 135: "#eda100",
 OTHER_DIRECTION_COLOR = "#8a8980"
 
 
-COMPARE_RANGE = [-1.3, 1.3]  # same axes on every panel so configurations compare fairly
+COMPARE_RANGE = [-1.3, 1.3]  # same axes on every position panel so configurations compare fairly
+
+# The three views on the comparison page: what each panel plots and which error its title gives.
+COMPARE_VIEWS = {
+    "position": dict(label="Position", metric=("final_pos", "final"), metric_label="final error",
+                     unit="m", digits=2, height=340),
+    "heading": dict(label="Heading", metric=("final_head", "final"),
+                    metric_label="final heading error", unit="°", digits=0, height=300,
+                    y_title="Heading change (°)"),
+    "speed": dict(label="Speed", metric=("speed", "rms"), metric_label="speed RMS error",
+                  unit="m/s", digits=2, height=300, y_title="Speed (m/s)"),
+}
+
+
+def compare_figure(view, angle, configs, cells, scored, color):
+    """One row of panels (one per wheel configuration) for a single commanded direction."""
+    spec = COMPARE_VIEWS[view]
+    key, kind = spec["metric"]
+    titles = []
+    for w in configs:
+        if (w, angle) not in cells:
+            titles.append(f"<b>{w}</b><br>not tested")
+            continue
+        m = metric_stats(scored[(w, angle)], key, kind)
+        unit = spec["unit"] if spec["unit"] == "°" else f" {spec['unit']}"
+        err = (f"{spec['metric_label']} {m['headline']:.{spec['digits']}f} ± "
+               f"{fmt(m['std'], spec['digits'])}{unit}" if m["headline"] is not None
+               else f"{spec['metric_label']} —")
+        titles.append(f"<b>{w}</b> ({len(cells[(w, angle)][0])} trials)<br>{err}")
+    fig = make_subplots(rows=1, cols=len(configs), subplot_titles=titles, horizontal_spacing=0.03)
+
+    if view == "position":
+        def xy(d, prefix):
+            return d[f"{prefix}_x"], d[f"{prefix}_y"]
+        hover = "x %{x:.2f} m<br>y %{y:.2f} m"
+    else:
+        def xy(d, prefix):
+            return d["t"], d[f"{prefix}_{view}"]
+        hover = ("t %{x:.2f} s<br>%{y:.0f}°" if view == "heading"
+                 else "t %{x:.2f} s<br>%{y:.2f} m/s")
+
+    y_values, t_max = [], 0
+    for col, w in enumerate(configs, start=1):
+        if (w, angle) not in cells:
+            continue
+        runs, _ = cells[(w, angle)]
+        for label, d in runs:
+            if d["n_actual"]:
+                x, y = xy(d, "vision")
+                y_values += [v for v in y if v is not None]
+                fig.add_trace(go.Scatter(
+                    x=x, y=y, mode="lines", connectgaps=False, showlegend=False, opacity=0.3,
+                    line=dict(color=color, width=1.2),
+                    hovertemplate=f"{w} trial {label}<br>{hover}<extra></extra>"), row=1, col=col)
+            t_max = max(t_max, d["t"][-1])
+        mean = mean_run([d for _, d in runs if moved(d)] or [d for _, d in runs])
+        x, y = xy(mean, "expected")
+        y_values += [v for v in y if v is not None]
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines", showlegend=False, line=dict(color=color, width=1.5, dash="dash"),
+            hovertemplate=f"{w} expected<br>{hover}<extra></extra>"), row=1, col=col)
+        x, y = xy(mean, "vision")
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines", showlegend=False, line=dict(color=color, width=3.5),
+            hovertemplate=f"{w} mean actual<br>{hover}<extra></extra>"), row=1, col=col)
+        if view == "position":
+            fig.add_trace(go.Scatter(
+                x=[0], y=[0], mode="markers", showlegend=False, hoverinfo="skip",
+                marker=dict(size=7, color=TEXT_COLOR, line=dict(color="white", width=1.5))),
+                row=1, col=col)
+
+    # Every panel in a row shares its axes, so configurations compare directly.
+    if view == "position":
+        x_range = y_range = COMPARE_RANGE
+    else:
+        lo, hi = min(y_values + [0]), max(y_values + [0])
+        pad = 0.06 * (hi - lo or 1)
+        x_range, y_range = [0, t_max], [lo - pad, hi + pad]
+    for col in range(1, len(configs) + 1):
+        suffix = "" if col == 1 else str(col)
+        fig.update_xaxes(range=x_range, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
+                         tickfont=dict(size=10), row=1, col=col)
+        y_opts = dict(range=y_range, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
+                      tickfont=dict(size=10), showticklabels=(col == 1))
+        if view == "position":
+            y_opts.update(scaleanchor=f"x{suffix}", scaleratio=1, constrain="range")
+        elif col == 1:
+            y_opts.update(title=dict(text=spec["y_title"], font=dict(size=11)))
+        fig.update_yaxes(row=1, col=col, **y_opts)
+    if view != "position":
+        fig.update_xaxes(title=dict(text="Time (s)", font=dict(size=11)), row=1, col=1)
+    fig.update_annotations(font=dict(size=12, color=TEXT_COLOR))
+    fig.update_layout(template="plotly_white", font=dict(color=TEXT_COLOR), height=spec["height"],
+                      margin=dict(l=55, r=10, t=60, b=40), hoverlabel=dict(bgcolor="white"))
+    return fig.to_html(full_html=False, include_plotlyjs=False, default_width="100%",
+                       config={"responsive": True})
+
+
+VIEW_SWITCH_JS = """<script>
+(function () {
+  var buttons = document.querySelectorAll('.viewbar button');
+  function show(view) {
+    document.body.setAttribute('data-view', view);
+    buttons.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
+    // Plots that were hidden need resizing to the page width once they become visible.
+    document.querySelectorAll('.view').forEach(function (v) {
+      if (v.offsetParent !== null) {
+        v.querySelectorAll('.plotly-graph-div').forEach(function (g) { Plotly.Plots.resize(g); });
+      }
+    });
+  }
+  buttons.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.view); }); });
+  show('position');
+})();
+</script>"""
+
+COMPARE_CSS = """<style>
+body { max-width: 1400px; }
+.scroll { overflow-x: auto; }
+.wide { min-width: 900px; }
+.viewbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: #fff;
+           padding: 8px 0; border-bottom: 1px solid #e4e3dc; display: flex; flex-wrap: wrap;
+           gap: 6px; align-items: center; }
+.viewbar button { font: inherit; padding: 5px 14px; border: 1px solid #c3c2b7; border-radius: 6px;
+                  background: #fff; color: #3d3d3a; cursor: pointer; }
+.viewbar button[aria-pressed="true"] { background: #2a78d6; border-color: #2a78d6; color: #fff; }
+.view-label { font-size: 13px; color: #6b6a63; margin: 8px 0 0; }
+body[data-view="position"] .view:not(.view-position),
+body[data-view="heading"] .view:not(.view-heading),
+body[data-view="speed"] .view:not(.view-speed) { display: none; }
+</style>"""
 
 
 def comparison_page(out_dir, config_runs, stats, page_name):
-    """One row per commanded direction, one panel per wheel configuration, side by side.
+    """One section per commanded direction, one panel per wheel configuration, side by side,
+    with a switch between the position, heading and speed views.
 
     config_runs: {wheels: [(angle, runs, overlay name)]}; stats: [(wheels, angle, scored, excluded)].
     """
@@ -360,74 +491,36 @@ def comparison_page(out_dir, config_runs, stats, page_name):
     sections = []
     for angle in angles:
         color = DIRECTION_COLORS.get(angle % 360, OTHER_DIRECTION_COLOR)
-        titles = []
-        for w in configs:
-            if (w, angle) not in cells:
-                titles.append(f"<b>{w}</b><br>not tested")
-                continue
-            m = metric_stats(scored[(w, angle)], "final_pos", "final")
-            err = (f"final error {m['headline']:.2f} ± {fmt(m['std'], 2)} m"
-                   if m["headline"] is not None else "final error —")
-            titles.append(f"<b>{w}</b> ({len(cells[(w, angle)][0])} trials)<br>{err}")
-        fig = make_subplots(rows=1, cols=len(configs), subplot_titles=titles,
-                            horizontal_spacing=0.03)
-        for col, w in enumerate(configs, start=1):
-            if (w, angle) not in cells:
-                continue
-            runs, _ = cells[(w, angle)]
-            for label, d in runs:
-                if d["n_actual"]:
-                    fig.add_trace(go.Scatter(
-                        x=d["vision_x"], y=d["vision_y"], mode="lines", connectgaps=False,
-                        showlegend=False, opacity=0.3, line=dict(color=color, width=1.2),
-                        hovertemplate=f"{w} trial {label}<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
-                        row=1, col=col)
-            mean = mean_run([d for _, d in runs if moved(d)] or [d for _, d in runs])
-            fig.add_trace(go.Scatter(
-                x=mean["expected_x"], y=mean["expected_y"], mode="lines", showlegend=False,
-                line=dict(color=color, width=1.5, dash="dash"),
-                hovertemplate=f"{w} expected<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
-                row=1, col=col)
-            fig.add_trace(go.Scatter(
-                x=mean["vision_x"], y=mean["vision_y"], mode="lines", showlegend=False,
-                line=dict(color=color, width=3.5),
-                hovertemplate=f"{w} mean actual<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
-                row=1, col=col)
-            fig.add_trace(go.Scatter(
-                x=[0], y=[0], mode="markers", showlegend=False, hoverinfo="skip",
-                marker=dict(size=7, color=TEXT_COLOR, line=dict(color="white", width=1.5))),
-                row=1, col=col)
-        for col in range(1, len(configs) + 1):
-            suffix = "" if col == 1 else str(col)
-            fig.update_xaxes(range=COMPARE_RANGE, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
-                             tickfont=dict(size=10), row=1, col=col)
-            fig.update_yaxes(range=COMPARE_RANGE, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
-                             scaleanchor=f"x{suffix}", scaleratio=1, constrain="range",
-                             tickfont=dict(size=10), showticklabels=(col == 1), row=1, col=col)
-        fig.update_annotations(font=dict(size=12, color=TEXT_COLOR))
-        fig.update_layout(template="plotly_white", font=dict(color=TEXT_COLOR), height=340,
-                          margin=dict(l=40, r=10, t=60, b=30), hoverlabel=dict(bgcolor="white"))
         links = " · ".join(f'<a href="{cells[(w, angle)][1]}">{w}</a>'
                            for w in configs if (w, angle) in cells)
-        sections.append(
-            f'<h2 id="dir{angle}">Commanded {angle}°</h2>'
-            f'<p class="meta">Per-configuration overlays: {links}</p>'
+        views = "".join(
+            f'<div class="view view-{view}"><p class="view-label">{spec["label"]}</p>'
             f'<div class="scroll"><div class="wide">'
-            + fig.to_html(full_html=False, include_plotlyjs=False, default_width="100%",
-                          config={"responsive": True}) + "</div></div>")
+            + compare_figure(view, angle, configs, cells, scored, color) + "</div></div></div>"
+            for view, spec in COMPARE_VIEWS.items())
+        sections.append(f'<h2 id="dir{angle}">Commanded {angle}°</h2>'
+                        f'<p class="meta">Per-configuration overlays: {links}</p>' + views)
 
     jump = " · ".join(f'<a href="#dir{a}">{a}°</a>' for a in angles)
+    buttons = "".join(f'<button type="button" data-view="{view}" aria-pressed="false">'
+                      f'{spec["label"]}</button>' for view, spec in COMPARE_VIEWS.items())
     title = "Wheel configuration comparison"
     # Styles go first: the plots size themselves to the page width as soon as they load.
-    body = ('<style>body{max-width:1400px} .scroll{overflow-x:auto} .wide{min-width:900px}</style>'
+    body = (COMPARE_CSS +
             '<p><a href="index.html">&larr; All tests</a></p>'
             f'<h1>{title}</h1>'
-            '<p class="meta">Each row is one commanded direction; each panel is one wheel '
-            'configuration, all drawn to the same scale (±1.3 m). Faint lines are individual '
-            'trials, the bold line is their mean and the dashed line is the expected 1 m path. '
-            'Every run starts at the black dot facing up. Panel titles give the mean final position '
-            'error ± σ across trials. Hover a line to see which trial it is.</p>'
-            f'<p>Jump to: {jump}</p>' + FRAME_NOTE + "".join(sections))
+            '<p class="meta">Each section is one commanded direction; each panel is one wheel '
+            'configuration, and every panel in a row shares the same axes. Faint lines are '
+            'individual trials, the bold line is their mean and the dashed line is what was '
+            'commanded. Panel titles give the matching error, mean ± σ across trials: final '
+            'position error for position, final heading error for heading, and speed RMS error '
+            '(actual vs commanded speed over the run) for speed. Hover a line to see which trial '
+            'it is.</p>'
+            f'<p>Jump to: {jump}</p>' + FRAME_NOTE +
+            f'<div class="viewbar" role="group" aria-label="Choose what to compare">'
+            f'<span class="meta" style="margin:0">Compare:</span>{buttons}'
+            f'<button type="button" data-view="all" aria-pressed="false">All three</button></div>'
+            + "".join(sections) + VIEW_SWITCH_JS)
     write_page(out_dir / page_name, title, body)
 
 
@@ -513,16 +606,18 @@ def run_errors(d):
     if max(v for v in d["vision_speed"] if v is not None) < STILL_SPEED:
         return "robot never moved"
     path = list(zip(d["expected_x"], d["expected_y"]))
-    pos_sq, head_sq, xt_sq = [], [], []
+    pos_sq, head_sq, xt_sq, speed_sq = [], [], [], []
     last = None
-    for i, (ex, ey, ax, ay, eh, ah) in enumerate(zip(
+    for i, (ex, ey, ax, ay, eh, ah, es, vs) in enumerate(zip(
             d["expected_x"], d["expected_y"], d["vision_x"], d["vision_y"],
-            d["expected_heading"], d["vision_heading"])):
+            d["expected_heading"], d["vision_heading"], d["expected_speed"], d["vision_speed"])):
         if ax is None:
             continue
         pos_sq.append((ax - ex) ** 2 + (ay - ey) ** 2)
         head_sq.append(wrap_deg(ah - eh) ** 2)
         xt_sq.append(distance_to_path(ax, ay, path) ** 2)
+        if vs is not None:
+            speed_sq.append((vs - es) ** 2)
         last = i
     # Final errors only count if vision saw the robot come to rest after the commanded stop.
     stop_t = max(t for t, s in zip(d["t"], d["expected_speed"]) if s > 0)
@@ -531,7 +626,8 @@ def run_errors(d):
         final_pos = math.dist((d["vision_x"][last], d["vision_y"][last]),
                               (d["expected_x"][-1], d["expected_y"][-1]))
         final_head = abs(wrap_deg(d["vision_heading"][last] - d["expected_heading"][-1]))
-    return dict(n=len(pos_sq), pos=pos_sq, head=head_sq, xt=xt_sq, step=d["step_profile"],
+    return dict(n=len(pos_sq), pos=pos_sq, head=head_sq, xt=xt_sq, speed=speed_sq,
+                step=d["step_profile"],
                 final_pos=final_pos, final_head=final_head)
 
 
@@ -564,7 +660,8 @@ def sigma_band(value, mean, std):
 # (key, column label, unit, decimals, kind). "rms" metrics hold per-sample squared errors
 # and the per-angle value pools every sample; "final" metrics are one number per trial and
 # the per-angle value is the mean across trials.
-TIMED_METRICS = [("pos", "Position RMS", "m", 3, "rms"), ("head", "Heading RMS", "°", 1, "rms")]
+TIMED_METRICS = [("pos", "Position RMS", "m", 3, "rms"), ("head", "Heading RMS", "°", 1, "rms"),
+                 ("speed", "Speed RMS", "m/s", 3, "rms")]
 PATH_METRICS = [("xt", "Cross-track RMS", "m", 3, "rms"),
                 ("final_pos", "Final position error", "m", 3, "final"),
                 ("final_head", "Final heading error", "°", 1, "final")]
