@@ -19,6 +19,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 import plotly.offline
+from plotly.subplots import make_subplots
 
 # Also accepts a browser duplicate-download suffix, e.g. "angle_test_2540_0_1 (1).csv".
 FILENAME_RE = re.compile(r"^angle_test_(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
@@ -341,6 +342,93 @@ def overlay_page(out_dir, wheels, angle, runs, links, overlay_name):
 DIRECTION_COLORS = {0: "#2a78d6", 45: "#eb6834", 90: "#1baf7a", 135: "#eda100",
                     180: "#e87ba4", 225: "#008300", 270: "#6250d6", 315: "#e34948"}
 OTHER_DIRECTION_COLOR = "#8a8980"
+
+
+COMPARE_RANGE = [-1.3, 1.3]  # same axes on every panel so configurations compare fairly
+
+
+def comparison_page(out_dir, config_runs, stats, page_name):
+    """One row per commanded direction, one panel per wheel configuration, side by side.
+
+    config_runs: {wheels: [(angle, runs, overlay name)]}; stats: [(wheels, angle, scored, excluded)].
+    """
+    configs = sorted(config_runs)
+    cells = {(w, a): (runs, name) for w in configs for a, runs, name in config_runs[w]}
+    scored = {(w, a): s for w, a, s, _ in stats}
+    angles = sorted({a for _, a in cells})
+
+    sections = []
+    for angle in angles:
+        color = DIRECTION_COLORS.get(angle % 360, OTHER_DIRECTION_COLOR)
+        titles = []
+        for w in configs:
+            if (w, angle) not in cells:
+                titles.append(f"<b>{w}</b><br>not tested")
+                continue
+            m = metric_stats(scored[(w, angle)], "final_pos", "final")
+            err = (f"final error {m['headline']:.2f} ± {fmt(m['std'], 2)} m"
+                   if m["headline"] is not None else "final error —")
+            titles.append(f"<b>{w}</b> ({len(cells[(w, angle)][0])} trials)<br>{err}")
+        fig = make_subplots(rows=1, cols=len(configs), subplot_titles=titles,
+                            horizontal_spacing=0.03)
+        for col, w in enumerate(configs, start=1):
+            if (w, angle) not in cells:
+                continue
+            runs, _ = cells[(w, angle)]
+            for label, d in runs:
+                if d["n_actual"]:
+                    fig.add_trace(go.Scatter(
+                        x=d["vision_x"], y=d["vision_y"], mode="lines", connectgaps=False,
+                        showlegend=False, opacity=0.3, line=dict(color=color, width=1.2),
+                        hovertemplate=f"{w} trial {label}<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
+                        row=1, col=col)
+            mean = mean_run([d for _, d in runs if moved(d)] or [d for _, d in runs])
+            fig.add_trace(go.Scatter(
+                x=mean["expected_x"], y=mean["expected_y"], mode="lines", showlegend=False,
+                line=dict(color=color, width=1.5, dash="dash"),
+                hovertemplate=f"{w} expected<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
+                row=1, col=col)
+            fig.add_trace(go.Scatter(
+                x=mean["vision_x"], y=mean["vision_y"], mode="lines", showlegend=False,
+                line=dict(color=color, width=3.5),
+                hovertemplate=f"{w} mean actual<br>x %{{x:.2f}} m<br>y %{{y:.2f}} m<extra></extra>"),
+                row=1, col=col)
+            fig.add_trace(go.Scatter(
+                x=[0], y=[0], mode="markers", showlegend=False, hoverinfo="skip",
+                marker=dict(size=7, color=TEXT_COLOR, line=dict(color="white", width=1.5))),
+                row=1, col=col)
+        for col in range(1, len(configs) + 1):
+            suffix = "" if col == 1 else str(col)
+            fig.update_xaxes(range=COMPARE_RANGE, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
+                             tickfont=dict(size=10), row=1, col=col)
+            fig.update_yaxes(range=COMPARE_RANGE, gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
+                             scaleanchor=f"x{suffix}", scaleratio=1, constrain="range",
+                             tickfont=dict(size=10), showticklabels=(col == 1), row=1, col=col)
+        fig.update_annotations(font=dict(size=12, color=TEXT_COLOR))
+        fig.update_layout(template="plotly_white", font=dict(color=TEXT_COLOR), height=340,
+                          margin=dict(l=40, r=10, t=60, b=30), hoverlabel=dict(bgcolor="white"))
+        links = " · ".join(f'<a href="{cells[(w, angle)][1]}">{w}</a>'
+                           for w in configs if (w, angle) in cells)
+        sections.append(
+            f'<h2 id="dir{angle}">Commanded {angle}°</h2>'
+            f'<p class="meta">Per-configuration overlays: {links}</p>'
+            f'<div class="scroll"><div class="wide">'
+            + fig.to_html(full_html=False, include_plotlyjs=False, default_width="100%",
+                          config={"responsive": True}) + "</div></div>")
+
+    jump = " · ".join(f'<a href="#dir{a}">{a}°</a>' for a in angles)
+    title = "Wheel configuration comparison"
+    # Styles go first: the plots size themselves to the page width as soon as they load.
+    body = ('<style>body{max-width:1400px} .scroll{overflow-x:auto} .wide{min-width:900px}</style>'
+            '<p><a href="index.html">&larr; All tests</a></p>'
+            f'<h1>{title}</h1>'
+            '<p class="meta">Each row is one commanded direction; each panel is one wheel '
+            'configuration, all drawn to the same scale (±1.3 m). Faint lines are individual '
+            'trials, the bold line is their mean and the dashed line is the expected 1 m path. '
+            'Every run starts at the black dot facing up. Panel titles give the mean final position '
+            'error ± σ across trials. Hover a line to see which trial it is.</p>'
+            f'<p>Jump to: {jump}</p>' + FRAME_NOTE + "".join(sections))
+    write_page(out_dir / page_name, title, body)
 
 
 def config_page(out_dir, wheels, by_angle, page_name):
@@ -670,8 +758,10 @@ def main():
         f'<th>Overlay</th><th>Individual trials</th></tr></thead><tbody>{"".join(rows)}'
         f'</tbody></table></div>' for wheels, rows in sorted(index_rows.items()))
     rows = summary_page(out_dir, stats)
+    comparison_page(out_dir, config_runs, stats, "compare.html")
     write_page(out_dir / "index.html", "Drivetrain angle tests",
                '<h1>Drivetrain angle tests</h1><p><a href="summary.html"><strong>Error summary'
+               '</strong></a> · <a href="compare.html"><strong>Compare wheel configurations'
                '</strong></a></p>' + sections + skipped_html +
                '<style>.scroll{overflow-x:auto} table{border-collapse:collapse}'
                'th,td{padding:6px 12px;border-bottom:1px solid #e4e3dc;text-align:left}'
