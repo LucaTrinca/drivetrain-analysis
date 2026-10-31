@@ -20,7 +20,8 @@ from pathlib import Path
 import plotly.graph_objects as go
 import plotly.offline
 
-FILENAME_RE = re.compile(r"^angle_test_(\d+)_(-?\d+)_(\d+)\.csv$")
+# Also accepts a browser duplicate-download suffix, e.g. "angle_test_2540_0_1 (1).csv".
+FILENAME_RE = re.compile(r"^angle_test_(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
 
 EXPECTED_COLOR = "#2a78d6"
 ACTUAL_COLOR = "#eb6834"
@@ -314,7 +315,7 @@ def trial_page(out_dir, wheels, angle, trial, path, d, n_runs, overlay_name):
             f'<h1>{html.escape(title)}</h1>'
             f'<p class="meta">{html.escape(path.name)} · run start {html.escape(d["run_start"])}</p>'
             + extra_runs_note(n_runs) + notes_html([(str(trial), d)]) + plots_html(figures(lines)))
-    out_name = path.stem + ".html"
+    out_name = f"angle_test_{wheels}_{angle}_{trial}.html"  # clean name even for "X (1).csv"
     write_page(out_dir / out_name, title, body)
     return out_name
 
@@ -615,13 +616,18 @@ def main():
     (out_dir / "plotly.min.js").write_text(plotly.offline.get_plotlyjs(), encoding="utf-8")
     (out_dir / ".nojekyll").touch()  # tell GitHub Pages to serve the files as-is
 
-    groups, skipped = defaultdict(list), []
+    groups, skipped, seen = defaultdict(list), [], {}
     for path in sorted(data_dir.rglob("*.csv")):
         m = FILENAME_RE.match(path.name)
         if not m:
             skipped.append(path.name)
             continue
         wheels, angle, trial = m.group(1), int(m.group(2)), int(m.group(3))
+        key = (wheels, angle, trial)
+        if key in seen:
+            skipped.append(f"{path.name} (same test as {seen[key].name})")
+            continue
+        seen[key] = path
         groups[(wheels, angle)].append((trial, path))
 
     index_rows, config_runs, stats = defaultdict(list), defaultdict(list), []
