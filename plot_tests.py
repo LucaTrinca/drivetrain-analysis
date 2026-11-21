@@ -21,8 +21,10 @@ import plotly.graph_objects as go
 import plotly.offline
 from plotly.subplots import make_subplots
 
-# Also accepts a browser duplicate-download suffix, e.g. "angle_test_2540_0_1 (1).csv".
-FILENAME_RE = re.compile(r"^angle_test_(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
+# angle_test_[new_]<wheel angles>_<commanded angle>_<trial>.csv, optionally with a browser
+# duplicate-download suffix such as " (1)". A "new_" prefix marks a re-tested configuration,
+# which is kept separate as e.g. "3540-new".
+FILENAME_RE = re.compile(r"^angle_test_(?:(new)_)?(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
 
 EXPECTED_COLOR = "#2a78d6"
 ACTUAL_COLOR = "#eb6834"
@@ -59,6 +61,20 @@ def load_runs(path):
     return [load_run(run_rows) for run_rows in runs.values()]
 
 
+MAX_BRIDGE = 3  # longest vision gap (samples, ~0.15 s) drawn as a continuous line
+
+
+def bridge_gaps(values, measured):
+    """Linearly fill runs of at most MAX_BRIDGE missing samples between two measured ones."""
+    out = list(values)
+    known = [i for i, m in enumerate(measured) if m and values[i] is not None]
+    for a, b in zip(known, known[1:]):
+        if 1 < b - a <= MAX_BRIDGE + 1:
+            for i in range(a + 1, b):
+                out[i] = values[a] + (values[b] - values[a]) * (i - a) / (b - a)
+    return out
+
+
 def load_run(rows):
     t0 = float(rows[0]["timestamp"])
     d = {"t": [float(r["timestamp"]) - t0 for r in rows]}
@@ -81,6 +97,12 @@ def load_run(rows):
         d[f"{prefix}_heading"] = relative_heading_deg(d[f"{prefix}_orientation"], h0)
     d["run_start"] = rows[0]["run_start"]
     d["n_actual"] = sum(v is not None for v in d["vision_x"])
+    # Some sessions log vision at roughly half the 20 Hz rate, leaving every other sample
+    # empty. Bridge gaps of up to MAX_BRIDGE samples so the plotted lines stay continuous;
+    # "measured" marks the real samples, and only those are used for the error numbers.
+    d["measured"] = [v is not None for v in d["vision_x"]]
+    for key in ("vision_x", "vision_y", "vision_heading", "vision_speed"):
+        d[key] = bridge_gaps(d[key], d["measured"])
     # Older runs command an instant step to full speed; newer ones ramp up over ~0.5 s.
     sp = d["expected_speed"]
     d["step_profile"] = sp[0] >= 0.1 or (len(sp) > 4 and sp[4] >= 0.4)
@@ -197,8 +219,9 @@ def missing_note(d):
     n = len(d["t"])
     if d["n_actual"] == 0:
         return "no actual (vision) data"
-    if d["n_actual"] < n:
-        return f"actual (vision) data missing for {n - d['n_actual']} of {n} samples"
+    unbridged = sum(v is None for v in d["vision_x"])  # gaps still open after bridging
+    if unbridged:
+        return f"actual (vision) data missing for {unbridged} of {n} samples"
     return ""
 
 
@@ -288,7 +311,8 @@ def notes_html(runs):
     html_out = ""
     if notes:
         html_out += ('<p class="note">' + "<br>".join(html.escape(n) for n in notes)
-                     + "<br>Gaps are left unconnected.</p>")
+                     + "<br>Gaps of up to 0.15 s are bridged; longer gaps are left "
+                     "unconnected.</p>")
     steps = [label for label, d in runs if d["step_profile"]]
     if steps:
         who = "This run's" if len(runs) == 1 else f"Trial{'s' * (len(steps) > 1)} {', '.join(steps)}:"
@@ -595,6 +619,24 @@ def wrap_deg(angle):
     return (angle + 180) % 360 - 180
 
 
+STALL_TRAVEL = 0.15  # m: a run that ends closer than this to its start...
+STALL_SPEED = 0.3    # m/s: ...and never goes faster than this failed (stalled or never moved)
+
+
+def failed_run(d):
+    """Why a run should be ignored entirely, or None if it's a usable run.
+
+    Spinning in place (e.g. 2540 at 90°) still reaches higher speeds, so it isn't caught here.
+    """
+    pts = [(x, y) for x, y, m in zip(d["vision_x"], d["vision_y"], d["measured"]) if m]
+    if not pts:
+        return "no vision data"
+    speeds = [s for s, m in zip(d["vision_speed"], d["measured"]) if m and s is not None]
+    if math.dist(pts[0], pts[-1]) < STALL_TRAVEL and max(speeds, default=0) < STALL_SPEED:
+        return "robot never moved or stalled"
+    return None
+
+
 def run_errors(d):
     """Error measures for one run, or a reason string when it can't be scored.
 
@@ -611,8 +653,8 @@ def run_errors(d):
     for i, (ex, ey, ax, ay, eh, ah, es, vs) in enumerate(zip(
             d["expected_x"], d["expected_y"], d["vision_x"], d["vision_y"],
             d["expected_heading"], d["vision_heading"], d["expected_speed"], d["vision_speed"])):
-        if ax is None:
-            continue
+        if not d["measured"][i]:
+            continue  # bridged plotting samples aren't real measurements
         pos_sq.append((ax - ex) ** 2 + (ay - ey) ** 2)
         head_sq.append(wrap_deg(ah - eh) ** 2)
         xt_sq.append(distance_to_path(ax, ay, path) ** 2)
@@ -807,7 +849,8 @@ def main():
         if not m:
             skipped.append(path.name)
             continue
-        wheels, angle, trial = m.group(1), int(m.group(2)), int(m.group(3))
+        wheels = m.group(2) + ("-new" if m.group(1) else "")
+        angle, trial = int(m.group(3)), int(m.group(4))
         key = (wheels, angle, trial)
         if key in seen:
             skipped.append(f"{path.name} (same test as {seen[key].name})")
@@ -815,17 +858,26 @@ def main():
         seen[key] = path
         groups[(wheels, angle)].append((trial, path))
 
-    index_rows, config_runs, stats = defaultdict(list), defaultdict(list), []
+    index_rows, config_runs, stats, ignored = defaultdict(list), defaultdict(list), [], []
     n_files = n_multi = 0
     for (wheels, angle) in sorted(groups):
         overlay_name = f"angle_test_{wheels}_{angle}_all_trials.html"
         runs, links = [], []
         scored, excluded = [], []
+        kept = []
         for trial, path in sorted(groups[(wheels, angle)]):
             loaded = load_runs(path)
             d = loaded[0]  # only the first run in each file counts
-            n_multi += len(loaded) > 1
-            name = trial_page(out_dir, wheels, angle, trial, path, d, len(loaded), overlay_name)
+            reason = failed_run(d)
+            if reason:
+                ignored.append(f"{wheels} {angle}° trial {trial} ({path.name}) — {reason}")
+            else:
+                kept.append((trial, path, d, len(loaded)))
+        if not kept:
+            continue
+        for trial, path, d, n_runs in kept:
+            n_multi += n_runs > 1
+            name = trial_page(out_dir, wheels, angle, trial, path, d, n_runs, overlay_name)
             runs.append((str(trial), d))
             links.append((trial, name))
             n_files += 1
@@ -846,6 +898,11 @@ def main():
     if skipped:
         skipped_html = ("<h2>Skipped (filename not in expected format)</h2><ul>"
                         + "".join(f"<li>{html.escape(s)}</li>" for s in skipped) + "</ul>")
+    if ignored:
+        skipped_html += ("<h2>Ignored failed runs</h2><p class=\"meta\">Not plotted or scored: no "
+                         "vision data, or the robot never moved / stalled (moved under 0.15 m "
+                         "and never exceeded 0.3 m/s).</p><ul>"
+                         + "".join(f"<li>{html.escape(s)}</li>" for s in ignored) + "</ul>")
     for wheels, by_angle in config_runs.items():
         config_page(out_dir, wheels, by_angle, f"angle_test_{wheels}_all_directions.html")
     sections = "".join(
@@ -864,7 +921,8 @@ def main():
                'th,td{padding:6px 12px;border-bottom:1px solid #e4e3dc;text-align:left}'
                'td.trials a{margin-right:8px}</style>')
     print(f"{n_files} trial pages ({n_multi} files had extra runs, first run used), "
-          f"{len(groups)} overlay pages, {len(skipped)} skipped: {skipped}\n")
+          f"{len(stats)} overlay pages, {len(skipped)} skipped: {skipped}")
+    print(f"{len(ignored)} failed runs ignored:\n  " + "\n  ".join(ignored) + "\n")
     metrics = TIMED_METRICS + PATH_METRICS
     print(f"{'wheels':>6} {'cmd':>4} {'n':>2} | " + " | ".join(
         f"{label} ({unit}) ±σ".rjust(26) for _, label, unit, _, _ in metrics))
