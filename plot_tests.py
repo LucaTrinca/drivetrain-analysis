@@ -21,10 +21,13 @@ import plotly.graph_objects as go
 import plotly.offline
 from plotly.subplots import make_subplots
 
-# angle_test_[new_]<wheel angles>_<commanded angle>_<trial>.csv, optionally with a browser
-# duplicate-download suffix such as " (1)". A "new_" prefix marks a re-tested configuration,
-# which is kept separate as e.g. "3540-new".
-FILENAME_RE = re.compile(r"^angle_test_(?:(new)_)?(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
+# angle_test_[<variant>_]<wheel angles>_<commanded angle>_<trial>.csv, optionally with a
+# browser duplicate-download suffix such as " (1)". A variant prefix marks a re-tested
+# configuration, kept separate under its own label, e.g. "3540-new".
+FILENAME_RE = re.compile(
+    r"^angle_test_(?:(new_wheels|new)_)?(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
+VARIANT_LABELS = {"new": "-new",           # Nov 19 re-test
+                  "new_wheels": "-xring"}  # single X-ring wheels
 
 EXPECTED_COLOR = "#2a78d6"
 ACTUAL_COLOR = "#eb6834"
@@ -849,7 +852,7 @@ def main():
         if not m:
             skipped.append(path.name)
             continue
-        wheels = m.group(2) + ("-new" if m.group(1) else "")
+        wheels = m.group(2) + VARIANT_LABELS.get(m.group(1), "")
         angle, trial = int(m.group(3)), int(m.group(4))
         key = (wheels, angle, trial)
         if key in seen:
