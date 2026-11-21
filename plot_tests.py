@@ -504,6 +504,122 @@ body[data-view="speed"] .view:not(.view-speed) { display: none; }
 </style>"""
 
 
+WINDOW = (1.8, 2.0)  # s after the run starts: early enough that most X-ring runs are tracked
+
+
+def window_errors(d, start=WINDOW[0], end=WINDOW[1]):
+    """Average errors over the measured samples between start and end seconds, or None."""
+    heading, heading_abs, position, speed = [], [], [], []
+    for t, m, ex, ey, ax, ay, eh, ah, es, vs in zip(
+            d["t"], d["measured"], d["expected_x"], d["expected_y"], d["vision_x"],
+            d["vision_y"], d["expected_heading"], d["vision_heading"], d["expected_speed"],
+            d["vision_speed"]):
+        if not m or not start <= t <= end:
+            continue
+        diff = wrap_deg(ah - eh)
+        heading.append(diff)
+        heading_abs.append(abs(diff))
+        position.append(math.hypot(ax - ex, ay - ey))
+        if vs is not None:
+            speed.append(abs(vs - es))
+    if not heading:
+        return None
+    avg = lambda v: sum(v) / len(v) if v else None  # noqa: E731
+    return dict(heading=avg(heading_abs), heading_signed=avg(heading), position=avg(position),
+                speed=avg(speed))
+
+
+WINDOW_METRICS = [
+    ("heading", "Heading error", "°", 1,
+     "Average angle between the actual and commanded heading. The signed average underneath "
+     "shows the drift direction: + is counter-clockwise (left), − is clockwise (right)."),
+    ("position", "Position error", "m", 3,
+     "Average straight-line distance between the actual and expected position."),
+    ("speed", "Speed error", "m/s", 3,
+     "Average size of the gap between actual and commanded speed."),
+]
+
+
+def window_page(out_dir, config_runs, page_name):
+    """Heading, position and speed error averaged over WINDOW, per configuration and direction."""
+    configs = sorted(config_runs)
+    angles = sorted({a for w in configs for a, _, _ in config_runs[w]})
+    cells = {}  # (wheels, angle) -> list of per-trial window errors
+    for w in configs:
+        for angle, runs, _ in config_runs[w]:
+            cells[(w, angle)] = [e for e in (window_errors(d) for _, d in runs) if e]
+
+    def summarise(values):
+        if not values:
+            return None, None
+        mean = sum(values) / len(values)
+        var = variance(values)
+        return mean, math.sqrt(var) if var is not None else None
+
+    tables, csv_rows = [], []
+    for key, label, unit, digits, explain in WINDOW_METRICS:
+        means = {}
+        for cell, errs in cells.items():
+            means[cell] = summarise([e[key] for e in errs if e[key] is not None])
+        top = max((m for m, _ in means.values() if m is not None), default=1) or 1
+        head = "".join(f"<th>{a}°</th>" for a in angles)
+        body = ""
+        for w in configs:
+            body += f"<tr><th scope=\"row\">{w}</th>"
+            for a in angles:
+                if (w, a) not in cells:
+                    body += '<td class="na">not tested</td>'
+                    continue
+                errs = cells[(w, a)]
+                mean, std = means[(w, a)]
+                if mean is None:
+                    body += '<td class="na">no data</td>'
+                    continue
+                # Shade by size of error: one blue ramp, darker = worse (text stays dark).
+                shade = f"rgba(57,135,229,{0.08 + 0.42 * mean / top:.2f})"
+                extra = ""
+                if key == "heading":
+                    signed = sum(e["heading_signed"] for e in errs) / len(errs)
+                    extra = f'<div class="sub">drift {signed:+.1f}°</div>'
+                body += (f'<td style="background:{shade}"><b>{mean:.{digits}f}</b> ± '
+                         f'{fmt(std, digits)}<div class="sub">{len(errs)} trials</div>{extra}</td>')
+            body += "</tr>"
+        tables.append(f'<h2>{label} ({unit})</h2><p class="meta">{explain}</p>'
+                      f'<div class="scroll"><table class="grid"><thead><tr><th>Wheels</th>{head}'
+                      f'</tr></thead><tbody>{body}</tbody></table></div>')
+
+    for (w, a), errs in sorted(cells.items()):
+        row = dict(wheels=w, angle=a, trials=len(errs))
+        for key, *_ in WINDOW_METRICS:
+            row[key], row[f"{key}_std"] = summarise([e[key] for e in errs if e[key] is not None])
+        row["heading_signed"] = (sum(e["heading_signed"] for e in errs) / len(errs)
+                                 if errs else None)
+        csv_rows.append(row)
+    with open(out_dir / "window_errors.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(csv_rows[0]))
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    title = f"Errors at {WINDOW[0]}–{WINDOW[1]} s"
+    body = ('<p><a href="index.html">&larr; All tests</a></p>'
+            f'<h1>{title}</h1>'
+            f'<p class="meta">Each value is measured over the {WINDOW[0]}–{WINDOW[1]} s window of '
+            'every run (time since the run started), using only real vision samples, then '
+            'averaged across trials: mean ± σ. The window is early enough that most X-ring runs, '
+            'which lose camera tracking partway through, are still tracked, so configurations '
+            'compare like for like. Trials with no vision sample in the window are left out, so '
+            'check each cell\'s trial count: X-ring at 45° has only 3. Darker cells are larger '
+            'errors. Also saved as '
+            '<code>window_errors.csv</code>.</p>'
+            + "".join(tables) +
+            '<style>body{max-width:1400px} .scroll{overflow-x:auto}'
+            'table.grid{border-collapse:collapse;margin-bottom:8px}'
+            'table.grid th,table.grid td{padding:6px 10px;border:1px solid #e4e3dc;'
+            'text-align:center;white-space:nowrap} table.grid tbody th{text-align:left}'
+            '.sub{font-size:12px;color:#6b6a63} td.na{color:#9b9a92;font-size:12px}</style>')
+    write_page(out_dir / page_name, title, body)
+
+
 def comparison_page(out_dir, config_runs, stats, page_name):
     """One section per commanded direction, one panel per wheel configuration, side by side,
     with a switch between the position, heading and speed views.
@@ -926,9 +1042,11 @@ def main():
         f'</tbody></table></div>' for wheels, rows in sorted(index_rows.items()))
     rows = summary_page(out_dir, stats)
     comparison_page(out_dir, config_runs, stats, "compare.html")
+    window_page(out_dir, config_runs, "window.html")
     write_page(out_dir / "index.html", "Drivetrain angle tests",
                '<h1>Drivetrain angle tests</h1><p><a href="summary.html"><strong>Error summary'
                '</strong></a> · <a href="compare.html"><strong>Compare wheel configurations'
+               '</strong></a> · <a href="window.html"><strong>Errors at 1.8–2.0 s'
                '</strong></a></p>' + sections + skipped_html +
                '<style>.scroll{overflow-x:auto} table{border-collapse:collapse}'
                'th,td{padding:6px 12px;border-bottom:1px solid #e4e3dc;text-align:left}'
