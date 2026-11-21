@@ -846,8 +846,17 @@ def main():
     (out_dir / "plotly.min.js").write_text(plotly.offline.get_plotlyjs(), encoding="utf-8")
     (out_dir / ".nojekyll").touch()  # tell GitHub Pages to serve the files as-is
 
+    # Runs removed by hand (e.g. severe swerves): data/excluded_runs.csv lists file,reason.
+    excluded_file = data_dir / "excluded_runs.csv"
+    manual_excludes = {}
+    if excluded_file.exists():
+        with open(excluded_file, newline="", encoding="utf-8") as f:
+            manual_excludes = {r["file"]: r["reason"] for r in csv.DictReader(f)}
+
     groups, skipped, seen = defaultdict(list), [], {}
     for path in sorted(data_dir.rglob("*.csv")):
+        if path == excluded_file:
+            continue
         m = FILENAME_RE.match(path.name)
         if not m:
             skipped.append(path.name)
@@ -871,7 +880,7 @@ def main():
         for trial, path in sorted(groups[(wheels, angle)]):
             loaded = load_runs(path)
             d = loaded[0]  # only the first run in each file counts
-            reason = failed_run(d)
+            reason = manual_excludes.get(path.name) or failed_run(d)
             if reason:
                 ignored.append(f"{wheels} {angle}° trial {trial} ({path.name}) — {reason}")
             else:
@@ -902,9 +911,10 @@ def main():
         skipped_html = ("<h2>Skipped (filename not in expected format)</h2><ul>"
                         + "".join(f"<li>{html.escape(s)}</li>" for s in skipped) + "</ul>")
     if ignored:
-        skipped_html += ("<h2>Ignored failed runs</h2><p class=\"meta\">Not plotted or scored: no "
-                         "vision data, or the robot never moved / stalled (moved under 0.15 m "
-                         "and never exceeded 0.3 m/s).</p><ul>"
+        skipped_html += ("<h2>Ignored runs</h2><p class=\"meta\">Not plotted or scored: no "
+                         "vision data, the robot never moved / stalled (moved under 0.15 m "
+                         "and never exceeded 0.3 m/s), or removed by hand in "
+                         "<code>data/excluded_runs.csv</code> (e.g. severe swerves).</p><ul>"
                          + "".join(f"<li>{html.escape(s)}</li>" for s in ignored) + "</ul>")
     for wheels, by_angle in config_runs.items():
         config_page(out_dir, wheels, by_angle, f"angle_test_{wheels}_all_directions.html")

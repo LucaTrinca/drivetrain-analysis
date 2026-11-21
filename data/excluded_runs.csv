@@ -1,0 +1,8 @@
+file,reason
+angle_test_new_wheels_3540_0_10.csv,severe swerve (0.44 m sideways, 86° rotation)
+angle_test_new_wheels_3540_0_4.csv,severe swerve (49° rotation)
+angle_test_new_wheels_3540_90_4.csv,severe swerve (0.58 m sideways, 107° rotation)
+angle_test_new_wheels_3540_90_5.csv,severe swerve (0.55 m sideways, 60° rotation)
+angle_test_new_wheels_3540_180_10.csv,severe swerve (0.60 m sideways, 63° rotation)
+angle_test_new_wheels_3540_270_3.csv,severe swerve (0.57 m sideways, 121° rotation)
+angle_test_new_wheels_3540_270_9.csv,severe swerve (0.43 m sideways, 76° rotation)
