@@ -540,6 +540,118 @@ WINDOW_METRICS = [
 ]
 
 
+SAMUEL_ANGLE = 45
+SAMUEL_COMPARE_WITH = ["3540-new", "3540-xring"]
+
+
+def load_samuel_runs(samuel_dir):
+    """Samuel's 45° tests: one trial per file, using the first run that actually moved.
+
+    Returns ([(label, data)], [notes]) — notes describe files that held extra runs or failed.
+    """
+    trials, notes = [], []
+    files = sorted(samuel_dir.glob("samuel_45_test_*.csv"),
+                   key=lambda p: int(re.search(r"_(\d+)\.csv$", p.name).group(1)))
+    for path in files:
+        label = re.search(r"_(\d+)\.csv$", path.name).group(1)
+        loaded = load_runs(path)
+        usable = [i for i, d in enumerate(loaded) if not failed_run(d)]
+        if not usable:
+            notes.append(f"Test {label}: no usable run (no vision data, or never moved)")
+            continue
+        first = usable[0]
+        trials.append((label, loaded[first]))
+        if first > 0:
+            notes.append(f"Test {label}: run 1 of {len(loaded)} never moved, so run "
+                         f"{first + 1} is used")
+        elif len(loaded) > 1:
+            notes.append(f"Test {label}: file holds {len(loaded)} runs; the first is used")
+    return trials, notes
+
+
+def samuel_page(out_dir, samuel_trials, notes, config_runs, stats, page_name):
+    """Samuel's 45° tests side by side with the 45° runs of the configurations to compare."""
+    angle = SAMUEL_ANGLE
+    cells, scored, links = {}, {}, {}
+    cells[("Samuel", angle)] = (samuel_trials, None)
+    scored[("Samuel", angle)] = [(label, e) for label, e in
+                                 ((label, run_errors(d)) for label, d in samuel_trials)
+                                 if not isinstance(e, str)]
+    stats_by = {(w, a): s for w, a, s, _ in stats}
+    configs = ["Samuel"]
+    for w in SAMUEL_COMPARE_WITH:
+        for a, runs, overlay in config_runs.get(w, []):
+            if a == angle:
+                cells[(w, a)] = (runs, overlay)
+                scored[(w, a)] = stats_by[(w, a)]
+                links[w] = overlay
+                configs.append(w)
+    color = DIRECTION_COLORS.get(angle, OTHER_DIRECTION_COLOR)
+    views = "".join(
+        f'<div class="view view-{view}"><p class="view-label">{spec["label"]}</p>'
+        f'<div class="scroll"><div class="wide">'
+        + compare_figure(view, angle, configs, cells, scored, color) + "</div></div></div>"
+        for view, spec in COMPARE_VIEWS.items())
+
+    # Summary table: the end-of-run errors plus the 1.8–2.0 s window errors.
+    def mean_std(values):
+        values = [v for v in values if v is not None]
+        if not values:
+            return "—"
+        mean = sum(values) / len(values)
+        var = variance(values)
+        return f"{mean:.{digits}f} ± {fmt(math.sqrt(var) if var is not None else None, digits)}"
+
+    columns = [("Final position error", "m", 3, lambda e, w: e["final_pos"]),
+               ("Final heading error", "°", 1, lambda e, w: e["final_head"]),
+               ("Cross-track RMS", "m", 3, lambda e, w: rms(e["xt"])),
+               ("Heading error at 1.8–2.0 s", "°", 1, lambda e, w: w and w["heading"]),
+               ("Position error at 1.8–2.0 s", "m", 3, lambda e, w: w and w["position"]),
+               ("Speed error at 1.8–2.0 s", "m/s", 3, lambda e, w: w and w["speed"])]
+    runs_by = {w: {label: d for label, d in cells[(w, angle)][0]} for w in configs}
+    rows = ""
+    for w in configs:
+        errs = scored[(w, angle)]
+        rows += f'<tr><th scope="row">{"Samuel" if w == "Samuel" else w}</th><td>{len(errs)}</td>'
+        for _, _, digits, get in columns:
+            vals = [get(e, window_errors(runs_by[w][label])) for label, e in errs]
+            rows += f"<td>{mean_std(vals)}</td>"
+        rows += "</tr>"
+    head = "".join(f"<th>{name} ({unit})</th>" for name, unit, _, _ in columns)
+    table = (f'<div class="scroll"><table class="grid"><thead><tr><th>Tests</th><th>Trials</th>'
+             f'{head}</tr></thead><tbody>{rows}</tbody></table></div>')
+
+    other_links = " · ".join(f'<a href="{links[w]}">{w} at {angle}°</a>' for w in links)
+    notes_html = ('<p class="note">' + "<br>".join(html.escape(n) for n in notes) + "</p>"
+                  if notes else "")
+    buttons = "".join(f'<button type="button" data-view="{view}" aria-pressed="false">'
+                      f'{spec["label"]}</button>' for view, spec in COMPARE_VIEWS.items())
+    title = "Samuel's tests"
+    # With only three panels a full-width row makes them very wide; keep them near-square.
+    body = (COMPARE_CSS + "<style>.narrow{max-width:1100px}</style>" +
+            '<p><a href="index.html">&larr; All tests</a></p>'
+            f'<h1>{title}</h1>'
+            f'<p class="meta">Samuel\'s {len(samuel_trials)} runs, all commanded at {angle}°, '
+            f'compared with the {angle}° runs of {", ".join(SAMUEL_COMPARE_WITH)}. These tests '
+            f'appear only on this page. Every panel in a row shares the same axes. Faint lines '
+            f'are individual trials, the bold line is their mean and the dashed line is what was '
+            f'commanded. Per-configuration overlays: {other_links}</p>'
+            + notes_html +
+            '<h2>Summary</h2><p class="meta">Mean ± σ across trials. Final errors are where the '
+            'robot came to rest; "—" means the camera lost the robot before it stopped (most '
+            'X-ring runs). Errors at 1.8–2.0 s are averaged over that window, as on the '
+            '<a href="window.html">Errors at 1.8–2.0 s</a> page.</p>' + table + FRAME_NOTE +
+            f'<div class="viewbar" role="group" aria-label="Choose what to compare">'
+            f'<span class="meta" style="margin:0">Compare:</span>{buttons}'
+            f'<button type="button" data-view="all" aria-pressed="false">All three</button></div>'
+            + f'<div class="narrow">{views}</div>' +
+            '<style>table.grid{border-collapse:collapse;margin-bottom:8px}'
+            'table.grid th,table.grid td{padding:6px 10px;border:1px solid #e4e3dc;'
+            'text-align:center;white-space:nowrap} table.grid tbody th{text-align:left}</style>'
+            + VIEW_SWITCH_JS)
+    write_page(out_dir / page_name, title, body)
+
+
 def window_page(out_dir, config_runs, page_name):
     """Heading, position and speed error averaged over WINDOW, per configuration and direction."""
     configs = sorted(config_runs)
@@ -1043,11 +1155,20 @@ def main():
     rows = summary_page(out_dir, stats)
     comparison_page(out_dir, config_runs, stats, "compare.html")
     window_page(out_dir, config_runs, "window.html")
+    # Samuel's tests live outside data_dir so they appear only on their own page.
+    samuel_dir = data_dir.parent / "samuel_data"
+    samuel_link = ""
+    if samuel_dir.exists():
+        samuel_trials, samuel_notes = load_samuel_runs(samuel_dir)
+        if samuel_trials:
+            samuel_page(out_dir, samuel_trials, samuel_notes, config_runs, stats, "samuel.html")
+            samuel_link = ' · <a href="samuel.html"><strong>Samuel\'s tests</strong></a>'
+            print(f"Samuel's tests: {len(samuel_trials)} trials. " + "; ".join(samuel_notes))
     write_page(out_dir / "index.html", "Drivetrain angle tests",
                '<h1>Drivetrain angle tests</h1><p><a href="summary.html"><strong>Error summary'
                '</strong></a> · <a href="compare.html"><strong>Compare wheel configurations'
                '</strong></a> · <a href="window.html"><strong>Errors at 1.8–2.0 s'
-               '</strong></a></p>' + sections + skipped_html +
+               '</strong></a>' + samuel_link + '</p>' + sections + skipped_html +
                '<style>.scroll{overflow-x:auto} table{border-collapse:collapse}'
                'th,td{padding:6px 12px;border-bottom:1px solid #e4e3dc;text-align:left}'
                'td.trials a{margin-right:8px}</style>')
