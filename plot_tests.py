@@ -21,13 +21,17 @@ import plotly.graph_objects as go
 import plotly.offline
 from plotly.subplots import make_subplots
 
-# angle_test_[<variant>_]<wheel angles>_<commanded angle>_<trial>.csv, optionally with a
-# browser duplicate-download suffix such as " (1)". A variant prefix marks a re-tested
-# configuration, kept separate under its own label, e.g. "3540-new".
+# <prefix>_<wheel angles>_<commanded angle>_<trial>.csv, optionally with a browser
+# duplicate-download suffix such as " (1)". The prefix says which test set the file belongs
+# to; anything other than plain "angle_test" is kept separate under its own label, e.g.
+# "3540-new".
 FILENAME_RE = re.compile(
-    r"^angle_test_(?:(new_wheels|new)_)?(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
-VARIANT_LABELS = {"new": "-new",           # Nov 19 re-test
-                  "new_wheels": "-xring"}  # single X-ring wheels
+    r"^(angle_test_new_wheels|angle_test_new|angle_test|cheese_control_test)"
+    r"_(\d+)_(-?\d+)_(\d+)(?: \(\d+\))?\.csv$")
+VARIANT_LABELS = {"angle_test": "",
+                  "angle_test_new": "-new",           # Nov 19 re-test
+                  "angle_test_new_wheels": "-xring",  # single X-ring wheels
+                  "cheese_control_test": "-cheese"}   # cheese control tests
 
 EXPECTED_COLOR = "#2a78d6"
 ACTUAL_COLOR = "#eb6834"
@@ -1089,7 +1093,7 @@ def main():
         if not m:
             skipped.append(path.name)
             continue
-        wheels = m.group(2) + VARIANT_LABELS.get(m.group(1), "")
+        wheels = m.group(2) + VARIANT_LABELS[m.group(1)]
         angle, trial = int(m.group(3)), int(m.group(4))
         key = (wheels, angle, trial)
         if key in seen:
